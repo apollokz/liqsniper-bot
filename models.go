@@ -17,7 +17,8 @@ type GlobalState struct {
 	Strike            float64
 	LiveChainlink     float64
 	LiveBinance       float64
-	BinanceLastUpdate int64 // Для отслеживания активности прямого коннекта
+	BinanceLastUpdate int64 // Метка активности прямого коннекта BTC
+	ETHLastUpdate     int64 // Метка активности прямого коннекта ETH
 	UnixTime          int64
 	BlockchainTime    int64
 	MarketTitle       string

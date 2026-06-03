@@ -41,7 +41,7 @@ func (se *StrategyEngine) AddLiquidation(l ForceOrderTick) {
 func (se *StrategyEngine) prune() {
 	nowMs := time.Now().UnixNano() / 1e6
 	cutoff := nowMs - 45000
-	
+
 	var activeFut []TradeTick
 	for _, t := range se.futuresTrades {
 		if t.Timestamp >= cutoff { activeFut = append(activeFut, t) }
@@ -73,34 +73,34 @@ func (se *StrategyEngine) CalculateOBI() float64 {
 	se.state.mu.RLock()
 	defer se.state.mu.RUnlock()
 
-	if len(se.state.Bids) == 0 || len(se.state.Asks) == 0 {
-		return 0
-	}
+	if len(se.state.Bids) > 0 && len(se.state.Asks) > 0 {
+		topBid := se.state.Bids[0].Price
+		topAsk := se.state.Asks[0].Price
+		boundaryBid := topBid * (1 - 0.005)
+		boundaryAsk := topAsk * (1 + 0.005)
 
-	topBid := se.state.Bids[0].Price
-	topAsk := se.state.Asks[0].Price
-	boundaryBid := topBid * (1 - 0.005)
-	boundaryAsk := topAsk * (1 + 0.005)
+		var bidVol float64
+		var askVol float64
 
-	var bidVol float64
-	var askVol float64
-
-	for _, b := range se.state.Bids {
-		if b.Price >= boundaryBid {
-			bidVol += b.Volume
+		for _, b := range se.state.Bids {
+			if b.Price >= boundaryBid { bidVol += b.Volume }
 		}
-	}
-	for _, a := range se.state.Asks {
-		if a.Price <= boundaryAsk {
-			askVol += a.Volume
+		for _, a := range se.state.Asks {
+			if a.Price <= boundaryAsk { askVol += a.Volume }
 		}
+
+		total := bidVol + askVol
+		if total == 0 { return 0 }
+		return (bidVol - askVol) / total
 	}
 
-	total := bidVol + askVol
-	if total == 0 {
-		return 0
+	if se.state.UpBid > 0 && se.state.DnBid > 0 {
+		total := se.state.UpBid + se.state.DnBid
+		if total == 0 { return 0 }
+		return (se.state.UpBid - se.state.DnBid) / total
 	}
-	return (bidVol - askVol) / total
+
+	return 0
 }
 
 func (se *StrategyEngine) GetTradeIntensity() (float64, float64) {
@@ -114,55 +114,61 @@ func (se *StrategyEngine) GetTradeIntensity() (float64, float64) {
 	var count30s float64
 
 	for _, t := range se.futuresTrades {
-		if t.Timestamp >= cutoff1s {
-			count1s++
-		}
-		if t.Timestamp >= cutoff30s {
-			count30s++
-		}
+		if t.Timestamp >= cutoff1s { count1s++ }
+		if t.Timestamp >= cutoff30s { count30s++ }
 	}
 	avg1s := count30s / 30.0
 	return count1s, avg1s
 }
 
-func (se *StrategyEngine) GetPriceVelocity100ms() float64 {
+// ФИКС v2.2.1: Ищем последнюю цену ДО начала 1s-окна (итерация с конца)
+// Старый баг: брал первую цену ВНУТРИ окна -> priceNow == price1sAgo -> delta=0
+func (se *StrategyEngine) GetPriceVelocity1s() float64 {
 	se.mu.Lock()
 	defer se.mu.Unlock()
-	nowMs := time.Now().UnixNano() / 1e6
-	cutoff100ms := nowMs - 100
 
 	if len(se.futuresTrades) < 2 {
 		return 0
 	}
 
-	priceNow := se.futuresTrades[len(se.futuresTrades)-1].Price
-	price100ms := priceNow
+	nowMs := time.Now().UnixNano() / 1e6
+	cutoff1s := nowMs - 1000
 
-	for _, t := range se.futuresTrades {
-		if t.Timestamp >= cutoff100ms {
-			price100ms = t.Price
+	priceNow := se.futuresTrades[len(se.futuresTrades)-1].Price
+
+	// Идём с конца к началу — ищем последний тик СТРОГО ДО окна 1s
+	price1sAgo := se.futuresTrades[0].Price // fallback: самый старый тик в буфере
+	found := false
+	for i := len(se.futuresTrades) - 1; i >= 0; i-- {
+		if se.futuresTrades[i].Timestamp < cutoff1s {
+			price1sAgo = se.futuresTrades[i].Price
+			found = true
 			break
 		}
 	}
 
-	return (priceNow - price100ms) / price100ms * 100
+	// Если все тики моложе 1s — буфер слишком свежий, берём самый старый как референс
+	if !found {
+		price1sAgo = se.futuresTrades[0].Price
+	}
+
+	if price1sAgo == 0 {
+		return 0
+	}
+	return (priceNow - price1sAgo) / price1sAgo * 100
 }
 
 func (se *StrategyEngine) GetLocal5mHighLow(periodStart int64) (float64, float64) {
 	se.state.mu.RLock()
 	defer se.state.mu.RUnlock()
-	
+
 	var high float64 = 0
 	var low float64 = 99999999
-	
+
 	for _, t := range se.state.Ticks {
 		if t.Timestamp >= periodStart {
-			if t.Value > high {
-				high = t.Value
-			}
-			if t.Value < low {
-				low = t.Value
-			}
+			if t.Value > high { high = t.Value }
+			if t.Value < low { low = t.Value }
 		}
 	}
 	return high, low
@@ -189,25 +195,22 @@ func (se *StrategyEngine) StartEvaluationLoop() {
 
 		cvd15s := se.CalculateCVD15s()
 		obi := se.CalculateOBI()
-		v100 := se.GetPriceVelocity100ms()
+		v1s := se.GetPriceVelocity1s()
 		intensity1s, avgIntensity := se.GetTradeIntensity()
 
-		// --- Сетап 1: Latency Arbitrage ---
-		if absFloat64(v100) > 0.05 {
+		if absFloat64(v1s) > 0.015 {
 			direction := "DOWN"
-			if v100 > 0 { direction = "UP" }
+			if v1s > 0 { direction = "UP" }
 			se.sim.TriggerTrade("Latency Arbitrage", direction, strike, livePrice, rem, cvd15s, obi)
 		}
 
-		// --- Сетап 2: Limit Absorption ---
-		if cvd15s < -30.0 && obi > 0.70 {
+		if cvd15s < -5.0 && obi > 0.55 {
 			se.sim.TriggerTrade("Limit Absorption", "UP", strike, livePrice, rem, cvd15s, obi)
-		} else if cvd15s > 30.0 && obi < -0.70 {
+		} else if cvd15s > 5.0 && obi < -0.55 {
 			se.sim.TriggerTrade("Limit Absorption", "DOWN", strike, livePrice, rem, cvd15s, obi)
 		}
 
-		// --- Сетап 3: Stop Run Sweep ---
-		if intensity1s > 4*avgIntensity && avgIntensity > 5 {
+		if intensity1s > 2.5*avgIntensity && avgIntensity > 5 {
 			periodStart := (bcTime - (bcTime % 300)) * 1000
 			high5m, low5m := se.GetLocal5mHighLow(periodStart)
 			if livePrice < low5m && cvd15s > 0 {
@@ -217,7 +220,6 @@ func (se *StrategyEngine) StartEvaluationLoop() {
 			}
 		}
 
-		// --- Сетап 4: Cross-Asset ETH Lead ---
 		if ethPrice > 0 && spotPrice > 0 {
 			ethPct := (ethPrice - spotPrice) / spotPrice * 100
 			if ethPct > 0.15 {

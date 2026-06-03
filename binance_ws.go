@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -38,9 +39,9 @@ type BinanceDepthData struct {
 }
 
 func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
+	// Горутина 1: WebSocket коннект фьючерсов
 	go func() {
 		for {
-			// Восстановлен полный стрим стаканов и ликвидаций (все в нижнем регистре)
 			url := "wss://fstream.binance.com/stream?streams=btcusdt@aggtrade/ethusdt@aggtrade/btcusdt@forceorder/btcusdt@depth20@100ms"
 			conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 			if err != nil {
@@ -48,7 +49,7 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 				if resp != nil {
 					status = resp.Status
 				}
-				fmt.Fprintf(os.Stderr, "[BINANCE API] Connection error: %v, HTTP: %s\n", err, status)
+				fmt.Fprintf(os.Stderr, "[BINANCE Futures WS] Сбой прямого коннекта (IP-ban?): %v, HTTP: %s. Переходим на гибридный резервный поток.\n", err, status)
 				time.Sleep(5 * time.Second)
 				continue
 			}
@@ -80,7 +81,7 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 						
 						state.mu.Lock()
 						state.LiveBinance = p
-						state.BinanceLastUpdate = time.Now().UnixMilli() // Фиксируем живой коннект
+						state.BinanceLastUpdate = time.Now().UnixMilli() // Фиксируем живой коннект BTC
 						state.mu.Unlock()
 					}
 				case "ethusdt@aggtrade":
@@ -92,6 +93,7 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 						
 						state.mu.Lock()
 						state.ETHFuturesPrice = p
+						state.ETHLastUpdate = time.Now().UnixMilli() // Фиксируем живой коннект ETH
 						state.mu.Unlock()
 					}
 				case "btcusdt@forceorder":
@@ -134,29 +136,59 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 		}
 	}()
 
+	// Горутина 2: REST-поллинг BTC Spot
 	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
 		for {
-			url := "wss://stream.binance.com:9443/ws/btcusdt@aggtrade"
-			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
-			if err != nil {
-				time.Sleep(2 * time.Second)
+			resp, err := client.Get("https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT")
+			if err == nil {
+				var r struct {
+					Price string `json:"price"`
+				}
+				if json.NewDecoder(resp.Body).Decode(&r) == nil {
+					p, _ := strconv.ParseFloat(r.Price, 64)
+					if p > 0 {
+						state.mu.Lock()
+						state.BTCSpotPrice = p
+						state.mu.Unlock()
+					}
+				}
+				resp.Body.Close()
+			}
+			time.Sleep(2 * time.Second)
+		}
+	}()
+
+	// Горутина 3: REST-поллинг ETH Futures (Динамический контроль свежести)
+	go func() {
+		client := &http.Client{Timeout: 3 * time.Second}
+		for {
+			time.Sleep(2 * time.Second)
+			
+			state.mu.RLock()
+			lastUpdate := state.ETHLastUpdate
+			state.mu.RUnlock()
+			
+			// Если вебсокет успешно обновил ETH в последние 5 секунд, пропускаем REST-запрос
+			if lastUpdate > 0 && (time.Now().UnixMilli() - lastUpdate) < 5000 {
 				continue
 			}
-
-			for {
-				_, msg, err := conn.ReadMessage()
-				if err != nil {
-					conn.Close()
-					break
+			
+			// Вебсокет молчит — делаем активный REST-запрос
+			resp, err := client.Get("https://fapi.binance.com/fapi/v1/ticker/price?symbol=ETHUSDT")
+			if err == nil {
+				var r struct {
+					Price string `json:"price"`
 				}
-
-				var trade BinanceTradeData
-				if json.Unmarshal(msg, &trade) == nil {
-					p, _ := strconv.ParseFloat(trade.Price, 64)
-					state.mu.Lock()
-					state.BTCSpotPrice = p
-					state.mu.Unlock()
+				if json.NewDecoder(resp.Body).Decode(&r) == nil {
+					p, _ := strconv.ParseFloat(r.Price, 64)
+					if p > 0 {
+						state.mu.Lock()
+						state.ETHFuturesPrice = p
+						state.mu.Unlock()
+					}
 				}
+				resp.Body.Close()
 			}
 		}
 	}()

@@ -21,7 +21,7 @@ type RTDSMessage struct {
 	} `json:"payload"`
 }
 
-func RTDSEngine(state *GlobalState) {
+func RTDSEngine(state *GlobalState, se *StrategyEngine) {
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial("wss://ws-live-data.polymarket.com", nil)
 		if err != nil {
@@ -71,8 +71,18 @@ func RTDSEngine(state *GlobalState) {
 				if m.Topic == "crypto_prices_chainlink" {
 					state.LiveChainlink = m.Payload.Value
 				} else if m.Topic == "crypto_prices" {
+					state.LiveBinance = m.Payload.Value
+					
+					// Гибридный инжектор тиков BTC в стратегию при падении прямого соединения
 					if time.Now().UnixMilli() - state.BinanceLastUpdate > 2000 {
-						state.LiveBinance = m.Payload.Value
+						state.mu.Unlock()
+						se.AddFuturesTrade(TradeTick{
+							Timestamp: time.Now().UnixNano() / 1e6,
+							Price:     m.Payload.Value,
+							Volume:    1.5,
+							IsBuyerMM: time.Now().UnixNano()%2 == 0,
+						})
+						state.mu.Lock()
 					}
 				}
 				state.mu.Unlock()

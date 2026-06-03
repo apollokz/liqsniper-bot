@@ -92,7 +92,7 @@ const adminHTML = `
 <!DOCTYPE html>
 <html>
 <head>
-    <title>LiqSniper Admin Panel v1.7.0</title>
+    <title>LiqSniper Admin Panel v2.2.0</title>
     <meta charset="utf-8">
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
@@ -119,7 +119,7 @@ const adminHTML = `
 <body>
     <div class="container">
         <header>
-            <h1>🛠 LiqSniper HFT Dashboard & Admin Panel (v1.7.0)</h1>
+            <h1>🛠 LiqSniper HFT Dashboard & Admin Panel (v2.2.0)</h1>
             <div id="market-title" style="font-weight: bold; color: #e2e8f0;">Loading market...</div>
         </header>
         <div class="grid">
@@ -128,7 +128,7 @@ const adminHTML = `
                 <div class="val" id="time-left">00:00</div>
             </div>
             <div class="card">
-                <h3>Live Binance vs Oracle Strike</h3>
+                <h3>Live Binance vs Oracle (Strike)</h3>
                 <div class="val" id="prices">$0.00 / $0.00</div>
             </div>
             <div class="card">
@@ -176,7 +176,12 @@ const adminHTML = `
                 document.getElementById('market-title').innerText = data.market_title || "Waiting...";
                 const rem = 300 - (data.blockchain_time % 300);
                 document.getElementById('time-left').innerText = formatTime(rem);
-                document.getElementById('prices').innerHTML = '<span style="color:#e2e8f0;">$' + data.live_binance.toFixed(2) + '</span> / <span style="color:#38bdf8;">$' + data.strike.toFixed(2) + '</span>';
+                
+                // РЕШЕНИЕ: Выводим Живой Binance, Живой Оракул (Chainlink) и зафиксированный Страйк (Str) в скобках
+                document.getElementById('prices').innerHTML = 
+                    '<span style="color:#e2e8f0;">$' + data.live_binance.toFixed(2) + '</span> / ' +
+                    '<span style="color:#38bdf8;">$' + data.live_chainlink.toFixed(2) + ' <small style="font-size:12px; color:#94a3b8;">(Str: $' + data.strike.toFixed(2) + ')</small></span>';
+                
                 document.getElementById('clob-prices').innerHTML = '<span style="color:#4ade80;">UP: ' + (data.up_bid*100).toFixed(1) + '¢</span> / <span style="color:#f87171;">DN: ' + (data.dn_bid*100).toFixed(1) + '¢</span>';
                 document.getElementById('extra-prices').innerHTML = '<span style="color:#f59e0b;">$' + data.btc_spot_price.toFixed(2) + '</span> / <span style="color:#a855f7;">$' + data.eth_price.toFixed(2) + '</span>';
                 

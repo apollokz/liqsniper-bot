@@ -13,7 +13,7 @@ func main() {
 
 	go DataEngine(state)
 	go WebSocketEngine(state)
-	go RTDSEngine(state)
+	go RTDSEngine(state, se)
 	StartBinanceStreams(state, se)
 	go se.StartEvaluationLoop()
 
@@ -50,10 +50,16 @@ func main() {
 			winRate = (float64(wins) / float64(total)) * 100
 		}
 
-		fmt.Fprintf(os.Stdout, "[ДАШБОРД v1.7.0] СТРАЙК: $%.2f | БИНАНС: $%.2f | ОРАКУЛ: $%.2f | ВРЕМЯ: %02d:%02d\n",
+		cvd := se.CalculateCVD15s()
+		obi := se.CalculateOBI()
+		v1s := se.GetPriceVelocity1s()
+
+		fmt.Fprintf(os.Stdout, "[ДАШБОРД v2.2.0] СТРАЙК: $%.2f | БИНАНС: $%.2f | ОРАКУЛ: $%.2f | ВРЕМЯ: %02d:%02d\n",
 			strike, liveBinance, liveChainlink, rem/60, rem%60)
-		fmt.Fprintf(os.Stdout, "[ДАШБОРД v1.7.0] Сделки: %d | Победы: %d | Поражения: %d | WinRate: %.1f%% | PnL: $%.3f\n",
+		fmt.Fprintf(os.Stdout, "[ИНДИКАТОРЫ v2.2.0] CVD_15s: %.2f BTC | OBI: %.2f | Velocity_1s: %.4f%%\n",
+			cvd, obi, v1s)
+		fmt.Fprintf(os.Stdout, "[ДАШБОРД v2.2.0] Сделки: %d | Победы: %d | Поражения: %d | WinRate: %.1f%% | PnL: $%.3f\n",
 			total, wins, loss, winRate, pnl)
-		fmt.Fprintf(os.Stdout, "[ДАШБОРД v1.7.0] UP Bid/Ask: %.1f¢/%.1f¢ | DN Bid/Ask: %.1f¢/%.1f¢\n", uB*100, uA*100, dB*100, dA*100)
+		fmt.Fprintf(os.Stdout, "[ДАШБОРД v2.2.0] UP Bid/Ask: %.1f¢/%.1f¢ | DN Bid/Ask: %.1f¢/%.1f¢\n", uB*100, uA*100, dB*100, dA*100)
 	}
 }
