@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strconv"
 	"time"
-
 	"github.com/gorilla/websocket"
 )
 
@@ -45,23 +44,17 @@ func discoverMarket(client *http.Client, mStart int64) (string, string, string) 
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "Mozilla/5.0 Chrome/120.0.0.0")
 	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", ""
-	}
+	if err != nil { return "", "", "" }
 	defer resp.Body.Close()
 	
 	var wrapper []struct {
 		Title   string `json:"title"`
-		Markets []struct {
-			ClobTokenIds string `json:"clobTokenIds"`
-		} `json:"markets"`
+		Markets []struct { ClobTokenIds string `json:"clobTokenIds"` } `json:"markets"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&wrapper); err == nil && len(wrapper) > 0 && len(wrapper[0].Markets) > 0 {
 		var ids []string
 		json.Unmarshal([]byte(wrapper[0].Markets[0].ClobTokenIds), &ids)
-		if len(ids) >= 2 {
-			return ids[0], ids[1], wrapper[0].Title
-		}
+		if len(ids) >= 2 { return ids[0], ids[1], wrapper[0].Title }
 	}
 	return "", "", ""
 }
@@ -69,15 +62,11 @@ func discoverMarket(client *http.Client, mStart int64) (string, string, string) 
 func runClobWS(tUp, tDn string, mStart int64, state *GlobalState) {
 	headers := http.Header{"Origin": []string{"https://polymarket.com"}}
 	conn, _, err := websocket.DefaultDialer.Dial("wss://ws-subscriptions-clob.polymarket.com/ws/market", headers)
-	if err != nil {
-		return
-	}
+	if err != nil { return }
 	defer conn.Close()
 
 	sub, _ := json.Marshal(map[string]interface{}{
-		"type":                   "market",
-		"assets_ids":             []string{tUp, tDn},
-		"custom_feature_enabled": true,
+		"type": "market", "assets_ids": []string{tUp, tDn}, "custom_feature_enabled": true,
 	})
 	conn.WriteMessage(websocket.TextMessage, sub)
 	
@@ -88,41 +77,34 @@ func runClobWS(tUp, tDn string, mStart int64, state *GlobalState) {
 			state.mu.RLock()
 			currentStart := state.BlockchainTime - (state.BlockchainTime % 300)
 			state.mu.RUnlock()
-			
-			if currentStart > mStart {
-				conn.Close()
-				return
-			}
+			if currentStart > mStart { conn.Close(); return }
 			_ = conn.WriteMessage(websocket.TextMessage, []byte("PING"))
 		}
 	}()
 
 	for {
 		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
+		if err != nil { break }
 
 		var evs []map[string]interface{}
 		if err := json.Unmarshal(msg, &evs); err != nil {
 			var single map[string]interface{}
-			if err := json.Unmarshal(msg, &single); err == nil {
-				evs = []map[string]interface{}{single}
-			} else {
-				continue
-			}
+			if err := json.Unmarshal(msg, &single); err == nil { evs = []map[string]interface{}{single} } else { continue }
 		}
 
 		for _, ev := range evs {
 			if ev["event_type"] == "best_bid_ask" {
-				asset, _ := ev["asset_id"].(string)
-				b, _ := strconv.ParseFloat(ev["best_bid"].(string), 64)
-				a, _ := strconv.ParseFloat(ev["best_ask"].(string), 64)
-				
+				var asset string
+				if val, ok := ev["asset_id"].(string); ok { asset = val } else if val, ok := ev["token_id"].(string); ok { asset = val }
+				var b float64
+				var a float64
+				if val, ok := ev["best_bid"].(string); ok { b, _ = strconv.ParseFloat(val, 64) }
+				if val, ok := ev["best_ask"].(string); ok { a, _ = strconv.ParseFloat(val, 64) }
+
 				state.mu.Lock()
 				if asset == tUp {
 					state.UpBid, state.UpAsk = b, a
-				} else {
+				} else if asset == tDn {
 					state.DnBid, state.DnAsk = b, a
 				}
 				state.mu.Unlock()

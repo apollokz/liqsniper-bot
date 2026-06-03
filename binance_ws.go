@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,17 +38,21 @@ type BinanceDepthData struct {
 }
 
 func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
-	// 1. Поток фьючерсов (Combined Streams через wss://fstream.binance.com)
 	go func() {
 		for {
-			url := "wss://fstream.binance.com/stream?streams=btcusdt@aggTrade/ethusdt@aggTrade/btcusdt@forceOrder/btcusdt@depth20@100ms"
-			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			// Восстановлен полный стрим стаканов и ликвидаций (все в нижнем регистре)
+			url := "wss://fstream.binance.com/stream?streams=btcusdt@aggtrade/ethusdt@aggtrade/btcusdt@forceorder/btcusdt@depth20@100ms"
+			conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 			if err != nil {
-				time.Sleep(2 * time.Second)
+				status := "Unknown"
+				if resp != nil {
+					status = resp.Status
+				}
+				fmt.Fprintf(os.Stderr, "[BINANCE API] Connection error: %v, HTTP: %s\n", err, status)
+				time.Sleep(5 * time.Second)
 				continue
 			}
 
-			// Пинг-понг обработчики для удержания коннекта
 			conn.SetPingHandler(func(appData string) error {
 				_ = conn.WriteMessage(websocket.PongMessage, []byte(appData))
 				return nil
@@ -63,52 +70,42 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 					continue
 				}
 
-				switch combined.Stream {
-				case "btcusdt@aggTrade":
+				switch strings.ToLower(combined.Stream) {
+				case "btcusdt@aggtrade":
 					var trade BinanceTradeData
 					if json.Unmarshal(combined.Data, &trade) == nil {
 						p, _ := strconv.ParseFloat(trade.Price, 64)
 						v, _ := strconv.ParseFloat(trade.Volume, 64)
-						tick := TradeTick{
-							Timestamp: trade.Timestamp,
-							Price:     p,
-							Volume:    v,
-							IsBuyerMM: trade.IsBuyerMM,
-						}
-						se.AddFuturesTrade(tick)
+						se.AddFuturesTrade(TradeTick{Timestamp: trade.Timestamp, Price: p, Volume: v, IsBuyerMM: trade.IsBuyerMM})
+						
 						state.mu.Lock()
 						state.LiveBinance = p
+						state.BinanceLastUpdate = time.Now().UnixMilli() // Фиксируем живой коннект
 						state.mu.Unlock()
 					}
-				case "ethusdt@aggTrade":
+				case "ethusdt@aggtrade":
 					var trade BinanceTradeData
 					if json.Unmarshal(combined.Data, &trade) == nil {
 						p, _ := strconv.ParseFloat(trade.Price, 64)
 						v, _ := strconv.ParseFloat(trade.Volume, 64)
-						tick := TradeTick{
-							Timestamp: trade.Timestamp,
-							Price:     p,
-							Volume:    v,
-							IsBuyerMM: trade.IsBuyerMM,
-						}
-						se.AddETHTrade(tick)
+						se.AddETHTrade(TradeTick{Timestamp: trade.Timestamp, Price: p, Volume: v, IsBuyerMM: trade.IsBuyerMM})
+						
 						state.mu.Lock()
 						state.ETHFuturesPrice = p
 						state.mu.Unlock()
 					}
-				case "btcusdt@forceOrder":
+				case "btcusdt@forceorder":
 					var liq BinanceForceOrderData
 					if json.Unmarshal(combined.Data, &liq) == nil {
 						v, _ := strconv.ParseFloat(liq.Order.Volume, 64)
 						p, _ := strconv.ParseFloat(liq.Order.Price, 64)
-						tick := ForceOrderTick{
+						se.AddLiquidation(ForceOrderTick{
 							Timestamp: time.Now().UnixNano() / 1e6,
 							Symbol:    liq.Order.Symbol,
 							Side:      liq.Order.Side,
 							Volume:    v,
 							Price:     p,
-						}
-						se.AddLiquidation(tick)
+						})
 					}
 				case "btcusdt@depth20@100ms":
 					var depth BinanceDepthData
@@ -116,17 +113,13 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 						var bids []BookLevel
 						var asks []BookLevel
 						for i, b := range depth.Bids {
-							if i >= 10 {
-								break
-							}
+							if i >= 10 { break }
 							pr, _ := strconv.ParseFloat(b[0], 64)
 							vol, _ := strconv.ParseFloat(b[1], 64)
 							bids = append(bids, BookLevel{Price: pr, Volume: vol})
 						}
 						for i, a := range depth.Asks {
-							if i >= 10 {
-								break
-							}
+							if i >= 10 { break }
 							pr, _ := strconv.ParseFloat(a[0], 64)
 							vol, _ := strconv.ParseFloat(a[1], 64)
 							asks = append(asks, BookLevel{Price: pr, Volume: vol})
@@ -141,10 +134,9 @@ func StartBinanceStreams(state *GlobalState, se *StrategyEngine) {
 		}
 	}()
 
-	// 2. Спотовый поток (wss://stream.binance.com)
 	go func() {
 		for {
-			url := "wss://stream.binance.com:9443/ws/btcusdt@aggTrade"
+			url := "wss://stream.binance.com:9443/ws/btcusdt@aggtrade"
 			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 			if err != nil {
 				time.Sleep(2 * time.Second)

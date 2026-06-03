@@ -28,7 +28,8 @@ func RTDSEngine(state *GlobalState) {
 			time.Sleep(2 * time.Second)
 			continue
 		}
-		sub := `{"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}]}`
+		
+		sub := `{"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"},{"topic":"crypto_prices","type":"*","filters":"{\"symbol\":\"btcusdt\"}"}]}`
 		conn.WriteMessage(websocket.TextMessage, []byte(sub))
 
 		go func(c *websocket.Conn) {
@@ -69,11 +70,17 @@ func RTDSEngine(state *GlobalState) {
 				state.mu.Lock()
 				if m.Topic == "crypto_prices_chainlink" {
 					state.LiveChainlink = m.Payload.Value
+				} else if m.Topic == "crypto_prices" {
+					if time.Now().UnixMilli() - state.BinanceLastUpdate > 2000 {
+						state.LiveBinance = m.Payload.Value
+					}
 				}
 				state.mu.Unlock()
 
-				addTick(state, time.Now().UnixNano()/1e6, m.Payload.Value)
-				recalculateStrikes(state)
+				if m.Topic == "crypto_prices_chainlink" {
+					addTick(state, time.Now().UnixNano()/1e6, m.Payload.Value)
+					recalculateStrikes(state)
+				}
 			}
 		}
 	}

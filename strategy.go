@@ -8,7 +8,6 @@ import (
 type StrategyEngine struct {
 	state         *GlobalState
 	futuresTrades []TradeTick
-	spotTrades    []TradeTick
 	ethTrades     []TradeTick
 	liquidations  []ForceOrderTick
 	mu            sync.Mutex
@@ -16,10 +15,7 @@ type StrategyEngine struct {
 }
 
 func NewStrategyEngine(state *GlobalState, sim *Simulator) *StrategyEngine {
-	return &StrategyEngine{
-		state: state,
-		sim:   sim,
-	}
+	return &StrategyEngine{state: state, sim: sim}
 }
 
 func (se *StrategyEngine) AddFuturesTrade(t TradeTick) {
@@ -44,47 +40,35 @@ func (se *StrategyEngine) AddLiquidation(l ForceOrderTick) {
 
 func (se *StrategyEngine) prune() {
 	nowMs := time.Now().UnixNano() / 1e6
-	// Храним данные максимум 45 секунд
 	cutoff := nowMs - 45000
 	
 	var activeFut []TradeTick
 	for _, t := range se.futuresTrades {
-		if t.Timestamp >= cutoff {
-			activeFut = append(activeFut, t)
-		}
+		if t.Timestamp >= cutoff { activeFut = append(activeFut, t) }
 	}
 	se.futuresTrades = activeFut
 
 	var activeEth []TradeTick
 	for _, t := range se.ethTrades {
-		if t.Timestamp >= cutoff {
-			activeEth = append(activeEth, t)
-		}
+		if t.Timestamp >= cutoff { activeEth = append(activeEth, t) }
 	}
 	se.ethTrades = activeEth
 }
 
-// 15s Кумулятивная дельта объемов (CVD)
 func (se *StrategyEngine) CalculateCVD15s() float64 {
 	se.mu.Lock()
 	defer se.mu.Unlock()
 	nowMs := time.Now().UnixNano() / 1e6
 	cutoff := nowMs - 15000
-
 	var cvd float64
 	for _, t := range se.futuresTrades {
 		if t.Timestamp >= cutoff {
-			if t.IsBuyerMM {
-				cvd -= t.Volume // Агрессивная продажа
-			} else {
-				cvd += t.Volume // Агрессивная покупка
-			}
+			if t.IsBuyerMM { cvd -= t.Volume } else { cvd += t.Volume }
 		}
 	}
 	return cvd
 }
 
-// 0.5% Расчет дисбаланса книги ордеров (OBI)
 func (se *StrategyEngine) CalculateOBI() float64 {
 	se.state.mu.RLock()
 	defer se.state.mu.RUnlock()
@@ -119,7 +103,6 @@ func (se *StrategyEngine) CalculateOBI() float64 {
 	return (bidVol - askVol) / total
 }
 
-// Интенсивность сделок фьючерса (Trade Intensity)
 func (se *StrategyEngine) GetTradeIntensity() (float64, float64) {
 	se.mu.Lock()
 	defer se.mu.Unlock()
@@ -142,7 +125,6 @@ func (se *StrategyEngine) GetTradeIntensity() (float64, float64) {
 	return count1s, avg1s
 }
 
-// 100ms Скорость изменения цены фьючерса (Price Velocity)
 func (se *StrategyEngine) GetPriceVelocity100ms() float64 {
 	se.mu.Lock()
 	defer se.mu.Unlock()
@@ -197,59 +179,47 @@ func (se *StrategyEngine) StartEvaluationLoop() {
 		ethPrice := se.state.ETHFuturesPrice
 		se.state.mu.RUnlock()
 
-		if bcTime == 0 || strike == 0 || livePrice == 0 {
-			continue
-		}
+		if bcTime == 0 || strike == 0 || livePrice == 0 { continue }
 
 		rem := 300 - (bcTime % 300)
-		// Условие 1: Временное окно от 1.5 до 3 минут до экспирации
-		if rem < 90 || rem > 180 {
-			continue
-		}
+		if rem < 90 || rem > 180 { continue }
 
-		// Условие 2: Дистанция до страйка реалистичная (Delta <= 80$)
 		dist := absFloat64(livePrice - strike)
-		if dist > 80.0 {
-			continue
-		}
+		if dist > 80.0 { continue }
 
 		cvd15s := se.CalculateCVD15s()
 		obi := se.CalculateOBI()
 		v100 := se.GetPriceVelocity100ms()
 		intensity1s, avgIntensity := se.GetTradeIntensity()
 
-		// --- СЕТАП 1: MM Latency & Lag (Price Velocity) ---
-		if absFloat64(v100) > 0.05 { // BTC сдвинулся более 0.05% за 100ms
+		// --- Сетап 1: Latency Arbitrage ---
+		if absFloat64(v100) > 0.05 {
 			direction := "DOWN"
-			if v100 > 0 {
-				direction = "UP"
-			}
+			if v100 > 0 { direction = "UP" }
 			se.sim.TriggerTrade("Latency Arbitrage", direction, strike, livePrice, rem, cvd15s, obi)
 		}
 
-		// --- СЕТАП 2: Limit Order Absorption (OBI & CVD) ---
-		if cvd15s < -30.0 && obi > 0.70 { // Плотные продажи уперлись в Bid Wall
+		// --- Сетап 2: Limit Absorption ---
+		if cvd15s < -30.0 && obi > 0.70 {
 			se.sim.TriggerTrade("Limit Absorption", "UP", strike, livePrice, rem, cvd15s, obi)
-		} else if cvd15s > 30.0 && obi < -0.70 { // Покупки уперлись в Ask Wall
+		} else if cvd15s > 30.0 && obi < -0.70 {
 			se.sim.TriggerTrade("Limit Absorption", "DOWN", strike, livePrice, rem, cvd15s, obi)
 		}
 
-		// --- СЕТАП 3: Stop Run Liquidity Sweep ---
+		// --- Сетап 3: Stop Run Sweep ---
 		if intensity1s > 4*avgIntensity && avgIntensity > 5 {
 			periodStart := (bcTime - (bcTime % 300)) * 1000
 			high5m, low5m := se.GetLocal5mHighLow(periodStart)
-			if livePrice < low5m && cvd15s > 0 { // Вынос лонг-стопов и мгновенный разворот CVD
+			if livePrice < low5m && cvd15s > 0 {
 				se.sim.TriggerTrade("Stop Run Sweep", "UP", strike, livePrice, rem, cvd15s, obi)
 			} else if livePrice > high5m && cvd15s < 0 {
 				se.sim.TriggerTrade("Stop Run Sweep", "DOWN", strike, livePrice, rem, cvd15s, obi)
 			}
 		}
 
-		// --- СЕТАП 4: Cross-Asset ETH Lead ---
+		// --- Сетап 4: Cross-Asset ETH Lead ---
 		if ethPrice > 0 && spotPrice > 0 {
-			// Вычисление относительной дельты ETH к BTC
-			// (простое сопоставление векторов ускорения за микроцикл)
-			ethPct := (ethPrice - spotPrice) / spotPrice * 100 // Спекулятивный базис
+			ethPct := (ethPrice - spotPrice) / spotPrice * 100
 			if ethPct > 0.15 {
 				se.sim.TriggerTrade("Cross-Asset ETH Lead", "UP", strike, livePrice, rem, cvd15s, obi)
 			} else if ethPct < -0.15 {
@@ -260,15 +230,11 @@ func (se *StrategyEngine) StartEvaluationLoop() {
 }
 
 func absFloat64(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
+	if x < 0 { return -x }
 	return x
 }
 
 func absInt64(x int64) int64 {
-	if x < 0 {
-		return -x
-	}
+	if x < 0 { return -x }
 	return x
 }
